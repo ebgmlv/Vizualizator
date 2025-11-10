@@ -138,58 +138,42 @@ def load_test_repo(file_path: str) -> Dict[str, List[str]]:
         raise ValueError(f"Cannot read test repository file: {e}")
 
 
-# ========== Graph building with DFS ==========
 def build_dependency_graph_dfs(
-    start_pkg: str,
+    pkg: str,
     repo: Dict[str, List[str]],
-    visited: Set[str],
     path: List[str],
+    completed: Set[str],
     graph: Dict[str, List[str]],
     cycles: List[List[str]]
 ) -> None:
-    """
-    Recursive DFS to build full dependency graph and detect cycles.
-    - repo: dict mapping package -> list of direct dependencies
-    - visited: global visited set (for avoiding reprocessing)
-    - path: current DFS path (for cycle detection)
-    - graph: output graph being built
-    - cycles: list to collect detected cycles (as lists of nodes)
-    """
-    if start_pkg in visited:
+    if pkg in completed:
         return
-    if start_pkg not in repo:
-        # Treat missing package as leaf (no deps)
-        graph[start_pkg] = []
-        visited.add(start_pkg)
-        return
-
-    # Detect cycle
-    if start_pkg in path:
-        cycle_start_index = path.index(start_pkg)
-        cycle = path[cycle_start_index:] + [start_pkg]
+    if pkg in path:
+        # Cycle detected
+        idx = path.index(pkg)
+        cycle = path[idx:] + [pkg]
         cycles.append(cycle)
-        # Still continue building, but don't recurse further to avoid infinite loop
-        graph[start_pkg] = repo[start_pkg]
-        visited.add(start_pkg)
+        # Do not recurse further to avoid infinite loop
+        deps = repo.get(pkg, [])
+        graph[pkg] = deps
+        completed.add(pkg)
         return
 
-    visited.add(start_pkg)
-    path.append(start_pkg)
-    deps = repo[start_pkg]
-    graph[start_pkg] = deps[:]  # copy
-
+    path.append(pkg)
+    deps = repo.get(pkg, [])
+    graph[pkg] = deps  # record deps early for output
     for dep in deps:
-        build_dependency_graph_dfs(dep, repo, visited, path, graph, cycles)
-
+        build_dependency_graph_dfs(dep, repo, path, completed, graph, cycles)
     path.pop()
+    completed.add(pkg)
 
 
 def get_full_dependency_graph_test(test_repo: Dict[str, List[str]], root: str) -> Tuple[Dict[str, List[str]], List[List[str]]]:
-    visited = set()
     path = []
+    completed = set()
     graph = {}
     cycles = []
-    build_dependency_graph_dfs(root, test_repo, visited, path, graph, cycles)
+    build_dependency_graph_dfs(root, test_repo, path, completed, graph, cycles)
     return graph, cycles
 
 
