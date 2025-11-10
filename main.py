@@ -1,7 +1,10 @@
 import argparse
 import os
 import sys
-from urllib.parse import urlparse
+import urllib.request
+import urllib.error
+from urllib.parse import urlparse, quote
+import xml.etree.ElementTree as ET
 
 
 def validate_package_name(name: str) -> str:
@@ -35,14 +38,20 @@ def validate_repo_path_or_url(path_or_url: str, mode: str) -> str:
     if mode == "test":
         return s
     parsed = urlparse(s)
-    if parsed.scheme in ('http', 'https', 'file'):
-        if parsed.scheme in ('http', 'https') and not parsed.netloc:
+    if parsed.scheme in ('http', 'https'):
+        if not parsed.netloc:
             raise ValueError("Invalid URL format.")
         return s
+    elif parsed.scheme == 'file':
+        local_path = parsed.path
+        if not os.path.exists(local_path):
+            raise ValueError(f"Local repository path does not exist: {local_path}")
+        return local_path
     else:
-        if not os.path.exists(s):
+        if os.path.exists(s):
+            return s
+        else:
             raise ValueError(f"Local repository path does not exist: {s}")
-        return s
 
 
 def validate_mode(mode: str) -> str:
@@ -52,9 +61,77 @@ def validate_mode(mode: str) -> str:
     return mode
 
 
+def fetch_nuspec_url(package: str, version: str, base_repo_url: str) -> str:
+    """
+    Construct .nuspec URL for NuGet flat container layout.
+    Assumes base_repo_url ends with '/v3-flatcontainer' or similar.
+    If base_repo_url is generic (e.g., https://api.nuget.org/v3/index.json),
+    we override to known flat container endpoint for simplicity.
+    """
+    # For simplicity, assume public nuget flat container format if user provides nuget.org-like URL
+    # Otherwise, expect user to provide exact flatcontainer base
+    lower_pkg = package.lower()
+    encoded_pkg = quote(lower_pkg)
+    encoded_ver = quote(version)
+    # Try to auto-construct for known public repo
+    if 'nuget.org' in base_repo_url:
+        return f"https://api.nuget.org/v3-flatcontainer/{encoded_pkg}/{encoded_ver}/{encoded_pkg}.nuspec"
+    else:
+        # Assume base_repo_url is already the flatcontainer base
+        if not base_repo_url.endswith('/'):
+            base_repo_url += '/'
+        return f"{base_repo_url}{encoded_pkg}/{encoded_ver}/{encoded_pkg}.nuspec"
+
+
+def fetch_nuspec_content(url: str) -> str:
+    try:
+        with urllib.request.urlopen(url) as response:
+            if response.status != 200:
+                raise ValueError(f"HTTP {response.status}: Failed to fetch .nuspec")
+            return response.read().decode('utf-8')
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise ValueError(f"Package or version not found: {url}")
+        else:
+            raise ValueError(f"HTTP error {e.code} while fetching .nuspec")
+    except urllib.error.URLError as e:
+        raise ValueError(f"Network error: {e.reason}")
+    except Exception as e:
+        raise ValueError(f"Failed to fetch .nuspec: {e}")
+
+
+def parse_dependencies_from_nuspec(nuspec_xml: str) -> list[tuple[str, str]]:
+    try:
+        root = ET.fromstring(nuspec_xml)
+        # Register namespace or handle it manually
+        # NuGet .nuspec uses namespace: http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd
+        ns = {'ns': 'http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd'}
+        deps = []
+        for dep in root.findall('.//ns:dependency', ns):
+            dep_id = dep.get('id')
+            dep_version = dep.get('version', '*')
+            if dep_id:
+                deps.append((dep_id, dep_version))
+        return deps
+    except ET.ParseError as e:
+        raise ValueError(f"Invalid .nuspec XML: {e}")
+
+
+def fetch_dependencies(package: str, version: str, repo_url: str, mode: str) -> list[tuple[str, str]]:
+    if mode != "online":
+        # Placeholder for offline/test modes (not implemented in Stage 2)
+        print("(Dependencies not fetched: only 'online' mode is supported in Stage 2)")
+        return []
+
+    nuspec_url = fetch_nuspec_url(package, version, repo_url)
+    nuspec_content = fetch_nuspec_content(nuspec_url)
+    dependencies = parse_dependencies_from_nuspec(nuspec_content)
+    return dependencies
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize package dependency graph (Stage 1: Configurable CLI prototype)."
+        description="Visualize package dependency graph (Stage 2: Dependency data collection)."
     )
     parser.add_argument(
         "--package",
@@ -99,6 +176,17 @@ def main():
         print(f"  repo: {repo}")
         print(f"  mode: {mode}")
         print(f"  output: {output}")
+        print()
+
+        # Stage 2: Fetch and display direct dependencies
+        dependencies = fetch_dependencies(package, version, repo, mode)
+
+        print("Direct dependencies:")
+        if dependencies:
+            for dep_id, dep_ver in dependencies:
+                print(f"  - {dep_id} ({dep_ver})")
+        else:
+            print("  (none)")
 
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
